@@ -1,0 +1,13 @@
+{
+  "train": [
+    {
+      "id": "shapenet_selected__raw_mesh__airplane__airplane_04",
+      "dataset": "shapenet",
+      "category": "airplane",
+      "source": "/mnt/sda/ubuntu/lkx/paper1/dataset/shapenet_selected/raw_mesh/airplane/airplane_04.obj",
+      "sampling_seed": 653948780,
+      "cache": "/mnt/sda/ubuntu/lkx/paper1/dataset/prepared/module_ladder_v2/train/shapenet_selected__raw_mesh__airplane__airplane_04/patches.npz",
+      "samples": "/mnt/sda/ubuntu/lkx/paper1/dataset/prepared/module_ladder_v2/train/shapenet_selected__raw_mesh__airplane__airplane_04/samples.npz"
+    }
+  ]
+}

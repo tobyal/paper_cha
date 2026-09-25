@@ -1,0 +1,5 @@
+[
+  {"name":"airplane300_joint","args":["--input","/mnt/sda/ubuntu/lkx/projects/Lkx_PaperA/data/den/raw_mesh/airplane/airplane_1.obj","--observations","300","--mode","joint"]},
+  {"name":"airplane300_frozen","args":["--input","/mnt/sda/ubuntu/lkx/projects/Lkx_PaperA/data/den/raw_mesh/airplane/airplane_1.obj","--observations","300","--mode","frozen"]},
+  {"name":"airplane300_raw","args":["--input","/mnt/sda/ubuntu/lkx/projects/Lkx_PaperA/data/den/raw_mesh/airplane/airplane_1.obj","--observations","300","--mode","raw"]}
+]

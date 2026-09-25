@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.so
+build/
+.build/
+tmp_build/
+outputs/
+weights/*.pth
+weights/*.pt
+*.tar.gz
+*.zip
+/VALIDATION*.json
+/verification*.json

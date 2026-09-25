@@ -1,0 +1,11 @@
+# Tested against the existing lkx_papera environment (Python 3.9).
+torch==2.1.2
+numpy<2
+scipy
+trimesh
+PyMCubes
+einops
+scikit-learn
+ninja
+matplotlib
+cachetools

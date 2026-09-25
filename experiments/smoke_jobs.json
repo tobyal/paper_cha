@@ -1,0 +1,64 @@
+[
+  {
+    "name": "frozen",
+    "args": [
+      "--input",
+      "/mnt/sda/ubuntu/lkx/paper1/paper_cha/outputs/smoke_airplane300_joint/input.ply",
+      "--steps",
+      "4",
+      "--minutes",
+      "2",
+      "--queries",
+      "32",
+      "--support-budget",
+      "128",
+      "--mesh-resolution",
+      "20",
+      "--snapshot-steps",
+      "--mode",
+      "frozen"
+    ]
+  },
+  {
+    "name": "raw",
+    "args": [
+      "--input",
+      "/mnt/sda/ubuntu/lkx/paper1/paper_cha/outputs/smoke_airplane300_joint/input.ply",
+      "--steps",
+      "4",
+      "--minutes",
+      "2",
+      "--queries",
+      "32",
+      "--support-budget",
+      "128",
+      "--mesh-resolution",
+      "20",
+      "--snapshot-steps",
+      "--mode",
+      "raw"
+    ]
+  },
+  {
+    "name": "external",
+    "args": [
+      "--input",
+      "/mnt/sda/ubuntu/lkx/paper1/paper_cha/outputs/smoke_airplane300_joint/input.ply",
+      "--steps",
+      "4",
+      "--minutes",
+      "2",
+      "--queries",
+      "32",
+      "--support-budget",
+      "128",
+      "--mesh-resolution",
+      "20",
+      "--snapshot-steps",
+      "--mode",
+      "external",
+      "--external-support",
+      "/mnt/sda/ubuntu/lkx/paper1/paper_cha/outputs/smoke_airplane300_joint/support_initial.ply"
+    ]
+  }
+]

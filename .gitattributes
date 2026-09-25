@@ -1,0 +1,2 @@
+# Preserve vendored source bytes and provenance hashes across Windows/Linux.
+* -text
