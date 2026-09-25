@@ -34,13 +34,6 @@ class SurfaceSupportLearner(nn.Module):
         self.decoder_kind = decoder
         self.deform = deform
         self.provenance = {'initialization': initialization, 'deformation': deform, 'decoder': decoder}
-        if initialization == 'pretrained':
-            checkpoint = Path(checkpoint or ROOT / 'weights/repkpu_pugan.pth')
-            state = torch.load(checkpoint, map_location='cpu', weights_only=True)
-            # Native official state or a checkpoint produced by train_prior.py.
-            state = state.get('backbone', state)
-            self.backbone.load_state_dict(state, strict=True)
-            self.provenance.update(checkpoint=str(checkpoint), sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(), state_items=len(state))
         if not deform:
             # Keep the official relative-coordinate calculation and receptive radius.
             # Switching REM.is_deform=False directly changes that path in upstream.
@@ -48,6 +41,24 @@ class SurfaceSupportLearner(nn.Module):
         if decoder == 'direct':
             self.direct = nn.Sequential(nn.Conv1d(64, 128, 1), nn.ReLU(), nn.Conv1d(128, 12, 1))
             self.provenance['new_random_head'] = True
+        if initialization == 'pretrained':
+            checkpoint = Path(checkpoint or ROOT / 'weights/repkpu_pugan.pth')
+            state = torch.load(checkpoint, map_location='cpu', weights_only=True)
+            if 'support_network' in state:
+                config = state.get('support_config', {})
+                if config and config != {'decoder': decoder, 'deform': deform}:
+                    raise ValueError(f'Checkpoint support configuration {config} does not match decoder/deform')
+                # Includes encoding, intermediate representation AND decoding,
+                # including a trained direct head when that branch is selected.
+                weights = state['support_network']
+                self.load_state_dict(weights, strict=True)
+                self.provenance.update(complete_prior_loaded=True, new_random_head=False)
+            else:
+                # Native official state or older query-only prior checkpoints.
+                weights = state.get('backbone', state)
+                self.backbone.load_state_dict(weights, strict=True)
+                self.provenance['complete_prior_loaded'] = decoder == 'query'
+            self.provenance.update(checkpoint=str(checkpoint), sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(), state_items=len(weights))
         # Single-shape optimization uses fixed pretrained BN statistics. Affine
         # parameters and all other backbone weights still receive gradients.
         self.backbone.eval()

@@ -16,6 +16,10 @@ def main():
     p.add_argument('--patience', type=int, default=8)
     p.add_argument('--lr', type=float, default=1e-4)
     p.add_argument('--initialization', choices=['pretrained', 'random'], default='pretrained')
+    p.add_argument('--checkpoint', help='Optional complete support-prior checkpoint')
+    p.add_argument('--decoder', choices=['query', 'direct'], default='query')
+    p.add_argument('--no-deform', action='store_true')
+    p.add_argument('--points', type=int, default=1024)
     p.add_argument('--seed', type=int, default=21)
     args = p.parse_args()
     torch.set_num_threads(4)
@@ -27,11 +31,14 @@ def main():
     cases = json.loads(manifest.read_text())['train']
     if not cases:
         raise ValueError('Empty training split')
-    learner = SurfaceSupportLearner(initialization=args.initialization).cuda().train()
+    learner = SurfaceSupportLearner(initialization=args.initialization, checkpoint=args.checkpoint,
+                                    decoder=args.decoder, deform=not args.no_deform).cuda().train()
     optimizer = torch.optim.Adam(learner.parameters(), lr=args.lr)
     best, stale, history = float('inf'), 0, []
     write_json(output / 'config.json', {'args': vars(args), 'initial': learner.provenance, 'training_cases': len(cases),
-                                      'validation_used': False, 'test_used': False})
+                                      'validation_used': False, 'test_used': False,
+                                      'prior_scope': 'complete encoding + intermediate representation + decoding',
+                                      'objective': 'surface CD plus original kernel regularization; no field feedback'})
     for epoch in range(1, args.epochs + 1):
         total = 0.
         for i in rng.permutation(len(cases)):
@@ -39,7 +46,11 @@ def main():
             if not path.is_absolute():
                 path = manifest.parent / path
             with np.load(path) as data:
-                pts, center, scale = normalize(data['p'])
+                sparse = data['p']
+                if len(sparse) < args.points:
+                    raise ValueError(f'{path} has {len(sparse)} observations, needs {args.points}; prepare the input cache first')
+                sparse = sparse[rng.choice(len(sparse), args.points, replace=False)]
+                pts, center, scale = normalize(sparse)
                 gt = (data['gt'] - center) / scale
             gt = gt[rng.choice(len(gt), min(8192, len(gt)), replace=False)]
             # Shared rotation augmentation; target and sparse input stay aligned.
@@ -60,7 +71,9 @@ def main():
         mean = total / len(cases)
         history.append({'epoch': epoch, 'loss': mean})
         write_json(output / 'training.json', history)
-        torch.save({'backbone': learner.backbone.state_dict(), 'epoch': epoch, 'optimizer': optimizer.state_dict()}, output / 'last.pt')
+        torch.save({'backbone': learner.backbone.state_dict(), 'support_network': learner.state_dict(),
+                    'support_config': {'decoder': args.decoder, 'deform': not args.no_deform},
+                    'epoch': epoch, 'optimizer': optimizer.state_dict()}, output / 'last.pt')
         print(history[-1], flush=True)
         if mean < best * .997:
             best, stale = mean, 0

@@ -1,6 +1,7 @@
-"""Joint, frozen-support, raw-observation and external-support reconstruction."""
+"""Frozen, one-way and joint support-field optimization, plus fixed-source controls."""
 import argparse
 import hashlib
+import os
 import time
 from pathlib import Path
 import numpy as np
@@ -16,16 +17,18 @@ def parser():
     p.add_argument('--input', required=True)
     p.add_argument('--output', required=True)
     p.add_argument('--observations', type=int, default=None, help='Required when constructing sparse input from a mesh')
-    p.add_argument('--mode', choices=['joint', 'frozen', 'raw', 'external'], default='joint')
+    p.add_argument('--mode', choices=['joint', 'oneway', 'frozen', 'raw', 'external'], default='joint')
     p.add_argument('--external-support', help='NTPS/BSDF support in the same world coordinates as the input')
     p.add_argument('--initialization', choices=['pretrained', 'random'], default='pretrained')
     p.add_argument('--checkpoint')
     p.add_argument('--no-deform', action='store_true')
     p.add_argument('--decoder', choices=['query', 'direct'], default='query')
     p.add_argument('--steps', type=int, default=2000)
-    p.add_argument('--minutes', type=float, default=30.)
+    p.add_argument('--minutes', type=float, default=30., help='Optimization wall limit; 0 uses only the step budget')
     p.add_argument('--queries', type=int, default=512)
     p.add_argument('--support-budget', type=int, default=4096)
+    p.add_argument('--require-support-budget', action='store_true', help='Reject insufficient support (Raw is exempt)')
+    p.add_argument('--field-max-levels', type=int, default=None, help='Fix progressive encoding limit across support sources')
     p.add_argument('--field-lr', type=float, default=1e-3)
     p.add_argument('--support-lr', type=float, default=1e-5)
     p.add_argument('--seed', type=int, default=21)
@@ -39,7 +42,7 @@ def parser():
 
 def main(args=None):
     args = parser().parse_args(args)
-    if args.steps < 1 or args.minutes <= 0 or args.queries < 8 or args.support_budget < 16:
+    if args.steps < 1 or args.minutes < 0 or args.queries < 8 or args.support_budget < 16:
         raise ValueError('Invalid optimization budget')
     if args.mode == 'external' and not args.external_support:
         raise ValueError('External mode requires --external-support')
@@ -67,7 +70,8 @@ def main(args=None):
         distance.fill_diagonal_(float('inf'))
         spacing = float(distance.min(1).values.median())
     learner, layout, selected, reference = None, None, None, None
-    if args.mode in ('joint', 'frozen'):
+    adaptive = args.mode in ('joint', 'oneway')
+    if args.mode in ('joint', 'oneway', 'frozen'):
         learner = SurfaceSupportLearner(args.initialization, args.checkpoint, not args.no_deform, args.decoder).to(args.device)
         layout = patch_layout(observations)
         with torch.no_grad():
@@ -85,16 +89,24 @@ def main(args=None):
         reference = fixed[selected].clone()
         raw_count = len(fixed)
         provenance = {'initialization': 'none', 'source': args.input if args.mode == 'raw' else args.external_support}
+    unique_count = len(torch.unique(reference, dim=0))
+    if args.require_support_budget and args.mode != 'raw' and unique_count != args.support_budget:
+        raise ValueError(f'Expected {args.support_budget} distinct supports, got {unique_count}')
     # Reset before creating the common implicit decoder for all ablations.
     torch.manual_seed(args.seed + 1)
-    field = MultiScaleTriPlaneSDF(point_size=len(reference)).to(args.device)
+    field = MultiScaleTriPlaneSDF(point_size=len(reference), max_levels=args.field_max_levels).to(args.device)
     groups = [{'params': field.parameters(), 'lr': args.field_lr}]
-    if learner is not None and args.mode == 'joint':
+    if learner is not None and adaptive:
         groups.append({'params': learner.parameters(), 'lr': args.support_lr})
     optimizer = torch.optim.Adam(groups)
     metadata = {'args': vars(args), 'provenance': provenance, 'loss_weights': DEFAULT_WEIGHTS,
+                'source_snapshot_sha256': os.environ.get('PAPER_CHA_SOURCE_SHA256'),
                 'input_sha256': hashlib.sha256(Path(args.input).read_bytes()).hexdigest(),
                 'observations': len(source), 'support_count': len(reference), 'raw_support_count': raw_count,
+                'unique_support_count_initial': unique_count,
+                'support_network_trainable': adaptive, 'field_to_support_feedback': args.mode == 'joint',
+                'prior_scope': 'complete encoding + local representation + query sampling + decoding network',
+                'gradient_clipping': 'each optimizer parameter group independently, norm 10',
                 'center': center.tolist(), 'scale': scale, 'spacing': spacing,
                 'gt_used_for_reconstruction': False, 'field': 'P3D-Mesh multiscale hash tri-plane + 3D hash-grid, without GSHE',
                 'field_fusion': 'xy + yz + xz + grid',
@@ -104,7 +116,7 @@ def main(args=None):
     save_points(out / 'support_initial.ply', reference * scale + torch.as_tensor(center, device=args.device))
 
     def predict():
-        if args.mode == 'joint':
+        if adaptive:
             prediction = learner(layout)
             prediction['points'] = prediction['points'][selected]
             return prediction
@@ -116,6 +128,11 @@ def main(args=None):
         tag = 'final' if final else f'step_{step:06d}'
         save_points(out / f'support_{tag}.ply', support * scale + torch.as_tensor(center, device=support.device))
         result = export_mesh(field, out / f'mesh_{tag}.ply', center, scale, args.mesh_resolution)
+        write_json(out / f'snapshot_{tag}.json', {
+            'step': step, 'seconds': time.monotonic() - start, 'mesh': result,
+            'support_displacement_normalized': float((support - reference).norm(dim=-1).mean()),
+            'support_displacement_world': float((support - reference).norm(dim=-1).mean()) * scale,
+            'support_count': len(support), 'point_correspondence': 'fixed initial FPS indices'})
         torch.save({'field': field.state_dict(), 'support_network': learner.state_dict() if learner else None,
                     'support': support.cpu(), 'observations': observations.cpu(), 'selected_indices': selected.cpu(),
                     'normalization': {'center': center, 'scale': scale}, 'step': step, 'field_encoding_step': field.step,
@@ -127,17 +144,20 @@ def main(args=None):
     ema, best, stale = None, float('inf'), 0
     final_step = 0
     try:
+        if 0 in args.snapshot_steps:
+            snapshot(0)
         with (out / 'training.jsonl').open('w', encoding='utf-8') as log:
             for step in range(1, args.steps + 1):
-                if time.monotonic() - start >= args.minutes * 60:
+                if args.minutes and time.monotonic() - start >= args.minutes * 60:
                     stop = 'time_budget'
                     break
                 optimizer.zero_grad(set_to_none=True)
                 field.set_step(step - 1)
                 prediction = predict()
                 # Random initialization has no learned geometric prior to preserve.
-                prior = reference if args.initialization == 'pretrained' and args.mode == 'joint' else None
-                losses = reconstruction_loss(field, prediction, observations, prior, args.queries, spacing, normals)
+                prior = reference if args.initialization == 'pretrained' and adaptive else None
+                losses = reconstruction_loss(field, prediction, observations, prior, args.queries, spacing, normals,
+                                             field_feedback=args.mode == 'joint')
                 loss = total_loss(losses)
                 if not torch.isfinite(loss):
                     raise FloatingPointError('Nonfinite objective')
@@ -145,7 +165,9 @@ def main(args=None):
                 parameters = [p for group in optimizer.param_groups for p in group['params']]
                 if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in parameters):
                     raise FloatingPointError('Nonfinite gradient')
-                torch.nn.utils.clip_grad_norm_(parameters, 10.)
+                # Shared clipping would let support gradients rescale field updates.
+                for group in optimizer.param_groups:
+                    torch.nn.utils.clip_grad_norm_(group['params'], 10.)
                 optimizer.step()
                 final_step = step
                 value = float(loss.detach())

@@ -12,11 +12,16 @@ from .p3d_sdf import SDFNetwork
 
 
 class MultiScaleTriPlaneSDF(SDFNetwork):
-    def __init__(self, point_size):
+    def __init__(self, point_size, max_levels=None):
         config = SimpleNamespace(d_in=3, d_out=1, d_hidden=256, n_layers=8,
                                  skip_in=[4], multires=8, geometric_init=True,
                                  weight_norm=True, inside_outside=False)
         super().__init__(point_size, config)
+        if max_levels is not None:
+            if not 1 <= max_levels <= 16:
+                raise ValueError('Field max_levels must be between 1 and 16')
+            self.plane_encoding.max_levels = max_levels
+            self.grid_encoding.max_levels = max_levels
         self.step = 0
 
     def set_step(self, step):
@@ -36,11 +41,18 @@ DEFAULT_WEIGHTS = {'pull': 1., 'surface': 0.3, 'observation_sdf': 0.3, 'observat
                    'eikonal': 0.1, 'prior': 0.2, 'repulsion': 0.05, 'kernel': 0.001, 'normal': 0.1}
 
 
-def reconstruction_loss(field, prediction, observations, reference, queries=512, spacing=0.03, normals=None):
+def reconstruction_loss(field, prediction, observations, reference, queries=512, spacing=0.03,
+                        normals=None, field_feedback=True):
+    """One-way disables only field-to-support feedback, not support adaptation.
+
+    Query locations are detached in both modes. Observation coverage, prior,
+    repulsion and representation regularization always retain live support.
+    """
     support = prediction['points']
+    field_support = support if field_feedback else support.detach()
     count = min(queries, len(support))
     selected = torch.randperm(len(support), device=support.device)[:count]
-    selected_support = support[selected]
+    selected_support = field_support[selected]
     near_count = queries * 3 // 4
     centers = torch.cat([observations, support.detach()], 0)
     near = centers[torch.randint(len(centers), (near_count,), device=support.device)]
@@ -49,7 +61,7 @@ def reconstruction_loss(field, prediction, observations, reference, queries=512,
     x = torch.cat([near, uniform], 0).detach().requires_grad_(True)
     values, gradients = field.value_gradient(x)
     pulled = x - values * F.normalize(gradients, dim=-1, eps=1e-8)
-    target = support[nearest_indices(x, support)[:, 0]]
+    target = field_support[nearest_indices(x, field_support)[:, 0]]
     # Live target coordinates allow pull loss to adapt the support learner.
     losses = {'pull': ((pulled - target).square().sum(-1) + 1e-12).sqrt().mean(),
               'surface': field(selected_support).abs().mean(),

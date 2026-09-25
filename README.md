@@ -82,6 +82,7 @@ CUDA_VISIBLE_DEVICES=3 python reconstruct.py \
 | 对照 | CLI |
 |---|---|
 | 完整联合优化 | `--mode joint` |
+| 支持适应但无场反馈 | `--mode oneway` |
 | 固定预训练支持 | `--mode frozen` |
 | 只有稀疏观测 | `--mode raw` |
 | 外部 NTPS/BSDF 支持 | `--mode external --external-support /absolute/support.ply` |
@@ -90,6 +91,10 @@ CUDA_VISIBLE_DEVICES=3 python reconstruct.py \
 | 无查询解码 | `--mode joint --decoder direct --support-lr 0.0001` |
 
 `direct` 是 local feature→偏移的新随机头，绕过 KGM/attention。它不能继承原查询解码权重，实验解释须包括这一训练起点差别。`no-deform` 将形变置零，保持原相对坐标和感受野；不直接切换上游会改变坐标处理的 rigid 分支。
+
+正式 direct/query 消融使用各自完整预训练的分支。`train_prior.py --decoder direct` 会保存包含 direct 头的完整支持网络；重建时传入该 checkpoint 并使用同一 decoder/deformation 配置。完整先验涵盖 Encoding、中间表示与查询网络、Decode。
+
+`oneway` 保留观测覆盖、先验保持、支持排斥和核点正则的支持网络梯度，只切断 pull 与零水平面损失对支持网络的反馈；隐式场仍正常更新。固定步数对照使用 `--minutes 0`，并通过 `--field-max-levels 6` 固定编码上限、`--require-support-budget` 检查生成支持数量。
 
 共同后端比较使用 `frozen/raw/external`；不能把 jointly adapted 的支持与固定外部支持混作纯支持来源消融。外部支持需在同一个输入世界坐标系中；如果 baseline 保存的是归一化坐标，先用其变换恢复后再输入。支持超过预算时统一 FPS，低于预算时保持原数量，记录实际数量。
 
@@ -117,4 +122,4 @@ python evaluate.py --prediction outputs/airplane300_joint/support_final.ply \
 
 `launch.py --jobs experiments/example_jobs.json --gpus 1 2 --output outputs/level0`，每个 GPU 同时一个单形状任务。启动前检查显存；不终止其他用户任务。日志、退出码与总状态写入输出目录。
 
-先用一个 airplane、300 个点检查 joint / frozen / raw 与支持—场反馈；再扩展 300/1024、少量形状与三个结构消融；最后接入 BSDF/NTPS 外部支持和原生重建结果。详细计划见 `EXPERIMENTS.md`。工程创建期间的短测试只验证实现，不代替科学结论。
+当前主实验统一 1024 点：先用一个 airplane 检查 Frozen / One-way / Joint 与支持来源的共同后端，再扩展三个代表形状和机制消融，最后最多十个形状。其他点数留给后续稀疏性分析。具体证据链见 [EXPERIMENTS.md](EXPERIMENTS.md)，首轮命令见 [experiments/README.md](experiments/README.md)。
