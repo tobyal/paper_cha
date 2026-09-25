@@ -7,8 +7,7 @@ import numpy as np
 import torch
 from ssr.geometry import load_points, normalize, patch_layout, fps_indices, save_points, write_json
 from ssr.support import SurfaceSupportLearner
-from ssr.field import MultiScaleTriPlaneSDF
-from ssr.objective import reconstruction_loss, total_loss, DEFAULT_WEIGHTS
+from ssr.implicit_reconstruction import MultiScaleTriPlaneSDF, reconstruction_loss, total_loss, DEFAULT_WEIGHTS
 from ssr.export import export_mesh
 
 

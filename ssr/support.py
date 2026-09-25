@@ -1,9 +1,16 @@
-"""Real RepKPU components; no placeholder encoders or renamed MLP kernels."""
+"""Method 3.1 orchestrator: representation -> queries -> explicit support.
+
+Sections 3.2--3.4 live in representation, query_sampling and support_mapping.
+The native backbone owns all weights so existing checkpoints remain compatible.
+"""
 import hashlib
 import sys
 from pathlib import Path
 import torch
 from torch import nn
+from .representation import build_local_representation
+from .query_sampling import sample_surface_queries
+from .support_mapping import decode_surface_support
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'vendor/repkpu'))
@@ -51,24 +58,12 @@ class SurfaceSupportLearner(nn.Module):
         return self
 
     def forward(self, layout):
-        pos = layout['patches']
-        batch, _, anchors = pos.shape
-        feat = self.backbone.encoder(pos)
+        # 3.2: anchor encoding and adaptive local surface representation.
+        representation = build_local_representation(self.backbone, layout['patches'])
         decoder = self.backbone.decoder
-        local, kernels, regularizer = decoder.rem(pos, feat)
-        if self.decoder_kind == 'query':
-            queries = decoder.kgm(pos, local)
-            q, k = decoder.projector(queries[1]), decoder.projector(kernels[1])
-            for attention in decoder.attns:
-                q = attention(q, k)
-            decoded = decoder.skip_mlp(torch.cat([
-                q.reshape(batch, decoder.disp_dim, -1),
-                feat.repeat_interleave(decoder.r, dim=-1)], dim=1))
-            offsets = torch.tanh(decoder.disp_mlp(decoded))
-        else:
-            offsets = torch.tanh(self.direct(local).view(batch, 3, decoder.r, anchors).permute(0, 1, 3, 2).reshape(batch, 3, -1))
-        support = pos.repeat_interleave(decoder.r, dim=-1) + offsets
-        patch_support = support.transpose(1, 2) * layout['radii'] + layout['centers']
-        return {'points': patch_support.reshape(-1, 3), 'patch_points': patch_support,
-                'regularizer': regularizer, 'kernel_offsets': kernels[0],
-                'anchor_features': feat, 'kernel_features': kernels[1]}
+        # 3.3: read surface evidence (bypassed only by the direct ablation).
+        queries = (sample_surface_queries(decoder, representation)
+                   if self.decoder_kind == 'query' else None)
+        # 3.4: decode evidence into support coordinates, retaining gradients.
+        return decode_surface_support(decoder, representation, queries, layout,
+                                      getattr(self, 'direct', None))

@@ -3,8 +3,7 @@ import argparse
 import torch
 from ssr.geometry import patch_layout, fps_indices, write_json
 from ssr.support import SurfaceSupportLearner
-from ssr.field import MultiScaleTriPlaneSDF
-from ssr.objective import reconstruction_loss, total_loss
+from ssr.implicit_reconstruction import MultiScaleTriPlaneSDF, reconstruction_loss, total_loss
 
 
 def nonzero_grad(module):

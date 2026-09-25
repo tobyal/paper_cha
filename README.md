@@ -9,18 +9,22 @@ Learning Surface Support Representations for Sparse Point Cloud Reconstruction.
 本工程研究：从稀疏观测推断显式表面支持，并将支持生成与隐式场在当前形状上联合优化。RepKPU 提供真实的几何编码、可变形核点表示及查询解码组件；方法最终服务于中间表面支持引导的重建，而非独立上采样排名。
 
 ```text
-稀疏观测 → RepKPU encoder → REM 局部核点表示 → KGM / attention → 动态支持 Sθ
-                                                           ↕
-                      观测约束 + 支持约束 + pull / Eikonal → Fφ(x) → 网格
+稀疏观测 → 3.2 局部几何表示 → 3.3 表面查询读取 → 3.4 三维支持 Sθ
+                                                            ↕
+                               3.5 支持约束的隐式重建 → Fφ(x) → 网格
 ```
+
+按当前 Method 3.2–3.5 阅读代码及公式、张量、消融位置的完整对应，见 [METHOD_CODE_MAP.md](METHOD_CODE_MAP.md)。四节的主要实现依次为 `ssr/representation.py`、`ssr/query_sampling.py`、`ssr/support_mapping.py`、`ssr/implicit_reconstruction.py`。
+
+本次整理保持原计算行为与权重接口，整理前后输出、梯度及联合重建链路的验证见 [VALIDATION_METHOD_LAYOUT.md](VALIDATION_METHOD_LAYOUT.md)。
 
 ## 实际实现与来源
 
 - `vendor/repkpu` 保存官方默认版 RepKPU 源码及 MIT 许可，修订 `80e2f293410a69747c0c61afe6f1fa2f71655133`。不是论文原版 RepKPU_o。
 - 默认加载官方 PU-GAN 预训练权重，481 个状态项严格匹配。来源与逐文件哈希见 `PROVENANCE.json`。
-- `ssr/support.py` 直接复用 encoder、REM、KGM、attention 和偏移头；输出适应当前形状的支持坐标，同时可访问核点及特征。原模型与适配器前向等价性由 `verify.py` 检查。
+- `ssr/support.py` 编排 3.2–3.4，直接复用 encoder、REM、KGM、attention 和偏移头；输出适应当前形状的支持坐标，同时可访问核点及特征。原模型与适配器前向等价性由 `verify.py` 检查。
 - 目前每个锚点保留官方 4 个查询，以兼容已验证权重。KGM 仍有固定局部查询坐标，不声称已实现纯 latent-query 或完全无坐标先验。对外任务参数是支持预算，而非级联上采样倍率；内部 vendor 保留原命名以便核查。
-- `ssr/field.py`、`ssr/p3d_sdf.py` 恢复原 P3D-Mesh 的多尺度 Hash 三平面、三维 Hash Grid、坐标位置编码及 8 层 SDF 解码器。只移除 GSHE，采用 xy + yz + xz + grid 直接求和。16 级、每级 2 通道、分辨率 16→2048、每 1000 步启用一级及按点数确定上限的逻辑均沿用原代码。
+- `ssr/implicit_reconstruction.py`、`ssr/p3d_sdf.py` 使用原 P3D-Mesh 的多尺度 Hash 三平面、三维 Hash Grid、坐标位置编码及 8 层 SDF 解码器。只移除 GSHE，采用 xy + yz + xz + grid 直接求和。16 级、每级 2 通道、分辨率 16→2048、每 1000 步启用一级及按点数确定上限的逻辑均沿用原代码。旧 `ssr/field.py`、`ssr/objective.py` 保留兼容导入。
 - 支持是动态 pulling 目标和零水平面监督，不作为额外条件特征输入 SDF。最近邻索引不求导，目标坐标与支持处的场查询保留梯度，重建损失同时更新支持网络与场网络。没有 PLY/NumPy 中转切断训练图。
 - 单形状优化固定 BN 运行统计，仿射参数与其余网络权重仍可学习。
 - 不加入 AFNet、原实验脚本、Cross 或 Agreement；先验证新框架的核心证据链。查询—核点 attention 属于原 RepKPU 组件，不称为新的 patch Cross 创新。
