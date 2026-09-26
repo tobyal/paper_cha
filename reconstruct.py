@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from ssr.geometry import load_points, normalize, patch_layout, fps_indices, save_points, write_json
 from ssr.support import SurfaceSupportLearner
+from ssr.adaptation import DIAGNOSTIC_MODES, SupportAdaptation
 from ssr.implicit_reconstruction import MultiScaleTriPlaneSDF, reconstruction_loss, total_loss, DEFAULT_WEIGHTS
 from ssr.export import export_mesh
 
@@ -17,10 +18,12 @@ def parser():
     p.add_argument('--input', required=True)
     p.add_argument('--output', required=True)
     p.add_argument('--observations', type=int, default=None, help='Required when constructing sparse input from a mesh')
-    p.add_argument('--mode', choices=['joint', 'oneway', 'frozen', 'raw', 'external'], default='joint')
+    p.add_argument('--mode', choices=['joint', 'oneway', 'frozen', 'raw', 'external', *DIAGNOSTIC_MODES], default='joint')
+    p.add_argument('--warmup-steps', type=int, default=3000, help='Delayed mode: freeze support through this step')
     p.add_argument('--external-support', help='NTPS/BSDF support in the same world coordinates as the input')
     p.add_argument('--initialization', choices=['pretrained', 'random'], default='pretrained')
     p.add_argument('--checkpoint')
+    p.add_argument('--initial-reference', help='Trusted existing run checkpoint at step 0; verify identical initialization')
     p.add_argument('--no-deform', action='store_true')
     p.add_argument('--decoder', choices=['query', 'direct'], default='query')
     p.add_argument('--steps', type=int, default=2000)
@@ -46,6 +49,10 @@ def main(args=None):
         raise ValueError('Invalid optimization budget')
     if args.mode == 'external' and not args.external_support:
         raise ValueError('External mode requires --external-support')
+    if args.mode in DIAGNOSTIC_MODES and (args.initialization != 'pretrained' or args.decoder != 'query' or args.no_deform):
+        raise ValueError('Diagnostics use the full pretrained query prior; do not combine ablations')
+    if args.mode == 'delayed' and not 0 < args.warmup_steps < args.steps:
+        raise ValueError('Delayed warm-up must be between 0 and the total step budget')
     out = Path(args.output)
     if out.exists() and any(out.iterdir()):
         raise FileExistsError(f'Refusing to overwrite an existing run: {out}')
@@ -70,8 +77,9 @@ def main(args=None):
         distance.fill_diagonal_(float('inf'))
         spacing = float(distance.min(1).values.median())
     learner, layout, selected, reference = None, None, None, None
+    adaptation = None
     adaptive = args.mode in ('joint', 'oneway')
-    if args.mode in ('joint', 'oneway', 'frozen'):
+    if args.mode in ('joint', 'oneway', 'frozen', *DIAGNOSTIC_MODES):
         learner = SurfaceSupportLearner(args.initialization, args.checkpoint, not args.no_deform, args.decoder).to(args.device)
         layout = patch_layout(observations)
         with torch.no_grad():
@@ -82,6 +90,8 @@ def main(args=None):
             learner.requires_grad_(False)
         provenance = learner.provenance
         raw_count = len(initial['points'])
+        if args.mode in DIAGNOSTIC_MODES:
+            adaptation = SupportAdaptation(learner, layout, initial, selected, args.mode, args.warmup_steps)
     else:
         array = source if args.mode == 'raw' else load_points(args.external_support)
         fixed = torch.tensor((array - center) / scale, device=args.device)
@@ -95,16 +105,39 @@ def main(args=None):
     # Reset before creating the common implicit decoder for all ablations.
     torch.manual_seed(args.seed + 1)
     field = MultiScaleTriPlaneSDF(point_size=len(reference), max_levels=args.field_max_levels).to(args.device)
+    initialization_check = None
+    if args.initial_reference:
+        baseline = torch.load(args.initial_reference, map_location='cpu', weights_only=False)
+        if baseline['step'] != 0:
+            raise ValueError('Initialization reference must be a step-zero checkpoint')
+        assert torch.equal(observations.cpu(), baseline['observations']), 'Different sparse observations'
+        assert torch.equal(selected.cpu(), baseline['selected_indices']), 'Different initial support indices'
+        support_error = float((reference.cpu() - baseline['support']).abs().max())
+        assert support_error < 1e-6, f'Different initial support: {support_error}'
+        state = field.state_dict()
+        assert state.keys() == baseline['field'].keys()
+        assert all(torch.equal(value.cpu(), baseline['field'][key]) for key, value in state.items()), 'Different initial field'
+        initialization_check = {'reference': args.initial_reference, 'support_max_error': support_error,
+                                'field_state_exact': True, 'observation_and_indices_exact': True}
+        del baseline, state
     groups = [{'params': field.parameters(), 'lr': args.field_lr}]
     if learner is not None and adaptive:
         groups.append({'params': learner.parameters(), 'lr': args.support_lr})
+    elif adaptation is not None:
+        groups.append({'params': adaptation.parameters(), 'lr': args.support_lr})
     optimizer = torch.optim.Adam(groups)
     metadata = {'args': vars(args), 'provenance': provenance, 'loss_weights': DEFAULT_WEIGHTS,
+                'initialization_check': initialization_check,
                 'source_snapshot_sha256': os.environ.get('PAPER_CHA_SOURCE_SHA256'),
                 'input_sha256': hashlib.sha256(Path(args.input).read_bytes()).hexdigest(),
                 'observations': len(source), 'support_count': len(reference), 'raw_support_count': raw_count,
                 'unique_support_count_initial': unique_count,
-                'support_network_trainable': adaptive, 'field_to_support_feedback': args.mode == 'joint',
+                'support_network_trainable': adaptive or args.mode in ('delayed', 'decoder_only'),
+                'field_to_support_feedback': args.mode == 'joint' or adaptation is not None,
+                'adaptation_mode': args.mode,
+                'feedback_start_step': (args.warmup_steps + 1 if args.mode == 'delayed' else
+                                        1 if args.mode in ('joint', 'decoder_only', 'residual') else None),
+                'residual_prior_weight': DEFAULT_WEIGHTS['prior'] if args.mode == 'residual' else None,
                 'prior_scope': 'complete encoding + local representation + query sampling + decoding network',
                 'gradient_clipping': 'each optimizer parameter group independently, norm 10',
                 'center': center.tolist(), 'scale': scale, 'spacing': spacing,
@@ -116,6 +149,8 @@ def main(args=None):
     save_points(out / 'support_initial.ply', reference * scale + torch.as_tensor(center, device=args.device))
 
     def predict():
+        if adaptation is not None:
+            return adaptation.predict()
         if adaptive:
             prediction = learner(layout)
             prediction['points'] = prediction['points'][selected]
@@ -132,8 +167,12 @@ def main(args=None):
             'step': step, 'seconds': time.monotonic() - start, 'mesh': result,
             'support_displacement_normalized': float((support - reference).norm(dim=-1).mean()),
             'support_displacement_world': float((support - reference).norm(dim=-1).mean()) * scale,
+            'support_displacement_p95_normalized': float(torch.quantile((support - reference).norm(dim=-1), .95)),
+            'adaptation_audit': adaptation.audit() if adaptation is not None else None,
             'support_count': len(support), 'point_correspondence': 'fixed initial FPS indices'})
         torch.save({'field': field.state_dict(), 'support_network': learner.state_dict() if learner else None,
+                    'support_residual': adaptation.delta.detach().cpu() if adaptation is not None and adaptation.delta is not None else None,
+                    'support_reference': reference.cpu(),
                     'support': support.cpu(), 'observations': observations.cpu(), 'selected_indices': selected.cpu(),
                     'normalization': {'center': center, 'scale': scale}, 'step': step, 'field_encoding_step': field.step,
                     'optimizer': optimizer.state_dict(), 'config': metadata}, out / f'{tag}.pt')
@@ -152,12 +191,13 @@ def main(args=None):
                     stop = 'time_budget'
                     break
                 optimizer.zero_grad(set_to_none=True)
+                adaptation_active = adaptation.begin_step(step) if adaptation is not None else adaptive
                 field.set_step(step - 1)
                 prediction = predict()
                 # Random initialization has no learned geometric prior to preserve.
-                prior = reference if args.initialization == 'pretrained' and adaptive else None
+                prior = reference if args.initialization == 'pretrained' and adaptation_active else None
                 losses = reconstruction_loss(field, prediction, observations, prior, args.queries, spacing, normals,
-                                             field_feedback=args.mode == 'joint')
+                                             field_feedback=args.mode == 'joint' or (adaptation is not None and adaptation_active))
                 loss = total_loss(losses)
                 if not torch.isfinite(loss):
                     raise FloatingPointError('Nonfinite objective')
@@ -173,6 +213,9 @@ def main(args=None):
                 value = float(loss.detach())
                 ema = value if ema is None else .95 * ema + .05 * value
                 row = {'step': step, 'seconds': time.monotonic() - start, 'loss': value, 'ema': ema,
+                       'adaptation_active': adaptation_active,
+                       'field_feedback_active': args.mode == 'joint' or (adaptation is not None and adaptation_active),
+                       'trainable_support_parameters': sum(p.numel() for g in optimizer.param_groups[1:] for p in g['params'] if p.requires_grad),
                        **{name: float(v.detach()) for name, v in losses.items()}}
                 log.write(__import__('json').dumps(row) + '\n')
                 log.flush()

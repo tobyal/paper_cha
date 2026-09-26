@@ -71,7 +71,9 @@ def main():
     failed = any(row['returncode'] or row['evaluation_returncode'] for row in receipts)
     summary_code = None
     if any(row['evaluation_returncode'] == 0 for row in receipts):
-        summary_code = subprocess.call([sys.executable, str(Path(__file__).parent / 'scripts/summarize_evidence.py'),
+        summary_script = ('summarize_diagnostics.py' if all(job.get('family') == 'adaptation_diagnostics' for job in jobs)
+                          else 'summarize_evidence.py')
+        summary_code = subprocess.call([sys.executable, str(Path(__file__).parent / 'scripts' / summary_script),
                                         '--root', str(root)])
         failed = failed or summary_code != 0
     write_json(root / 'status.json', {'status': 'failed' if failed else 'complete', 'jobs': receipts,

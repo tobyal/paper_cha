@@ -35,6 +35,9 @@ def main():
         metrics.update(kind=kind, tag=tag, step=state['step'], seconds=state['seconds'])
         if kind == 'support' and len(points) == len(initial):
             metrics['normalized_displacement'] = float(np.linalg.norm(points - initial, axis=1).mean() / scale)
+            metrics['normalized_displacement_p95'] = float(np.quantile(np.linalg.norm(points - initial, axis=1), .95) / scale)
+        if state.get('adaptation_audit') is not None:
+            metrics['adaptation_audit'] = state['adaptation_audit']
         write_json(run / 'metrics' / f'{path.stem}.json', metrics)
         rows.append(metrics)
     write_json(run / 'evaluation.json', {'case': case['name'], 'rows': rows,

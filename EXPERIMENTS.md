@@ -2,6 +2,8 @@
 
 主实验固定 1024 个观测点。完整先验是 Encoding + 自适应局部表示 + 查询相关网络 + Decode 的整条支持生成分支，后端保持原 P3D 多尺度三平面 / 3D Hash Grid，无 GSHE。
 
+首轮结果显示 Frozen 优于 Full Joint；当前优先开展反馈时机、解码范围、显式残差三个诊断实验，方案与运行入口见 [ADAPTATION_DIAGNOSTICS.md](experiments/ADAPTATION_DIAGNOSTICS.md)。三个新增配置已实现并通过短测。
+
 先一个 airplane，再三个代表形状，最后最多十个测试形状。沿用 ShapeNet 每类三个测试、PU-GAN test，无验证集的划分。完整形状只用于离线评价或训练集上的先验预训练。
 
 ## 0. 流程检查
